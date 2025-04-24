@@ -29,3 +29,27 @@ For extraction:
 
 ## Link to Report:
 - **Ongoing**
+
+## Instructions for Running the Application
+
+1. **Clone the repository (or create the files):**
+    ```bash
+    git clone https://github.com/anbinh93/IT4015_steganographic_project.git
+    cd steganography-app
+    ```
+
+2. **Create a virtual environment (Recommended):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+    ```
+
+3. **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Running the Application
+
+```bash
+streamlit run app.py
