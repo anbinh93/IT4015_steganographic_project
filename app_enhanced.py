@@ -9,35 +9,73 @@ import logging
 import base64
 import tempfile
 from pathlib import Path
-
-# Import local modules
-from steganography.lsb import encode_lsb, decode_lsb
-from steganography.audio_lsb import encode_audio_lsb, decode_audio_lsb
-from steganography.dct_stego import encode_dct, decode_dct
-from steganography.video_lsb import encode_video_lsb, decode_video_lsb, calculate_video_capacity, get_video_info
-from steganography.utils import (
-    generate_key, encrypt_message, decrypt_message
-)
-from steganography.exceptions import CapacityError, EncodingError, DecodingError, SteganographyError
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Import local modules
+try:
+    from steganography.lsb import encode_lsb, decode_lsb
+    from steganography.audio_lsb import encode_audio_lsb, decode_audio_lsb
+    from steganography.dct_stego import encode_dct, decode_dct
+    from steganography.video_lsb import encode_video_lsb, decode_video_lsb, calculate_video_capacity, get_video_info
+    from steganography.utils import (
+        generate_key, encrypt_message, decrypt_message
+    )
+    from steganography.exceptions import CapacityError, EncodingError, DecodingError, SteganographyError
+except ImportError as e:
+    st.error(f"Error importing steganography modules: {e}")
+    st.stop()
+
 # --- Configuration ---
 OUTPUT_FORMAT = ".png"
 ALLOWED_IMAGE_TYPES = ['png', 'bmp', 'tiff', 'jpg', 'jpeg']
-ALLOWED_AUDIO_TYPES = ['wav']
-ALLOWED_VIDEO_TYPES = ['mp4', 'avi', 'mov']
+ALLOWED_AUDIO_TYPES = ['wav', 'mp3', 'wma']
+ALLOWED_VIDEO_TYPES = ['mp4', 'avi', 'mov', 'wmv', 'mkv']
+
+# Create temp directory if it doesn't exist
+TEMP_DIR = "temp"
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
 
 # --- Enhanced Helper Functions ---
+def sanitize_filename(filename):
+    """Sanitize filename by removing special characters and converting to ASCII."""
+    # Get the base name and extension
+    base, ext = os.path.splitext(filename)
+    
+    # Convert to ASCII, replacing non-ASCII characters
+    base = base.encode('ascii', 'ignore').decode('ascii')
+    
+    # Remove special characters
+    base = ''.join(c for c in base if c.isalnum() or c in (' ', '-', '_'))
+    
+    # Replace spaces with underscores
+    base = base.replace(' ', '_')
+    
+    # Combine base and extension
+    return base + ext.lower()
+
 def load_image_from_upload(uploaded_file):
     if uploaded_file is not None:
         try:
-            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            # Sanitize filename
+            safe_filename = sanitize_filename(uploaded_file.name)
+            temp_path = os.path.join(TEMP_DIR, safe_filename)
+            
+            # Save to temp file first
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Read using cv2
+            img = cv2.imread(temp_path)
             if img is None:
                 st.error("Could not decode image. Is the file format correct and supported?")
                 return None
+                
+            # Clean up temp file
+            os.remove(temp_path)
             return img
         except Exception as e:
             st.error(f"Error loading image: {e}")
@@ -45,16 +83,36 @@ def load_image_from_upload(uploaded_file):
             return None
     return None
 
-def save_uploaded_file(uploaded_file, directory="temp"):
+def save_uploaded_file(uploaded_file, directory=TEMP_DIR):
     """Save uploaded file to temporary directory and return path"""
     if uploaded_file is not None:
         if not os.path.exists(directory):
             os.makedirs(directory)
         
-        file_path = os.path.join(directory, uploaded_file.name)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        return file_path
+        # Get file extension and sanitize filename
+        file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+        safe_filename = sanitize_filename(uploaded_file.name)
+        
+        # Check if file type is supported
+        if media_type == "Image" and file_ext[1:] not in ALLOWED_IMAGE_TYPES:
+            st.error(f"Unsupported image format. Please use: {', '.join(ALLOWED_IMAGE_TYPES)}")
+            return None
+        elif media_type == "Audio" and file_ext[1:] not in ALLOWED_AUDIO_TYPES:
+            st.error(f"Unsupported audio format. Please use: {', '.join(ALLOWED_AUDIO_TYPES)}")
+            return None
+        elif media_type == "Video" and file_ext[1:] not in ALLOWED_VIDEO_TYPES:
+            st.error(f"Unsupported video format. Please use: {', '.join(ALLOWED_VIDEO_TYPES)}")
+            return None
+        
+        file_path = os.path.join(directory, safe_filename)
+        try:
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            return file_path
+        except Exception as e:
+            st.error(f"Error saving file: {e}")
+            logging.error(f"Failed to save uploaded file: {e}", exc_info=True)
+            return None
     return None
 
 def get_image_download_bytes(img_array_bgr, format=OUTPUT_FORMAT):
@@ -97,8 +155,62 @@ def display_key_management(widget_key_prefix: str):
         st.rerun()
         return None
 
+def handle_file_upload(uploaded_file, media_type):
+    """Handle file upload with better error handling and validation."""
+    if uploaded_file is None:
+        return None, None
+        
+    try:
+        # Get file info
+        file_name = uploaded_file.name
+        file_size = uploaded_file.size
+        file_type = uploaded_file.type
+        
+        # Log file info
+        logging.info(f"Uploading file: {file_name} ({file_size} bytes, type: {file_type})")
+        
+        # Validate file size (max 200MB)
+        if file_size > 200 * 1024 * 1024:
+            st.error("File too large. Maximum size is 200MB.")
+            return None, None
+            
+        # Get file extension
+        file_ext = os.path.splitext(file_name)[1].lower()[1:]
+        
+        # Validate file type
+        if media_type == "Image" and file_ext not in ALLOWED_IMAGE_TYPES:
+            st.error(f"Unsupported image format. Please use: {', '.join(ALLOWED_IMAGE_TYPES)}")
+            return None, None
+        elif media_type == "Audio" and file_ext not in ALLOWED_AUDIO_TYPES:
+            st.error(f"Unsupported audio format. Please use: {', '.join(ALLOWED_AUDIO_TYPES)}")
+            return None, None
+        elif media_type == "Video" and file_ext not in ALLOWED_VIDEO_TYPES:
+            st.error(f"Unsupported video format. Please use: {', '.join(ALLOWED_VIDEO_TYPES)}")
+            return None, None
+            
+        # Create safe filename
+        safe_filename = f"upload_{int(time.time())}_{file_ext}.{file_ext}"
+        file_path = os.path.join(TEMP_DIR, safe_filename)
+        
+        # Save file
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+            
+        logging.info(f"File saved to: {file_path}")
+        return file_path, file_type
+        
+    except Exception as e:
+        logging.error(f"Error handling file upload: {e}", exc_info=True)
+        st.error(f"Error uploading file: {str(e)}")
+        return None, None
+
 # --- Streamlit App UI ---
-st.set_page_config(page_title="Advanced StegoTool", layout="wide", page_icon="🔐")
+st.set_page_config(
+    page_title="Advanced StegoTool",
+    layout="wide",
+    page_icon="🔐",
+    initial_sidebar_state="expanded"
+)
 st.title("🔐 Advanced StegoTool: Multimedia Steganography")
 st.caption("Hide secrets in Images, Audio, and Video with multiple algorithms")
 
@@ -154,9 +266,9 @@ with tab1:
     if media_type == "Image":
         st.markdown("Upload a cover image and provide the secret data.")
     elif media_type == "Audio":
-        st.markdown("Upload a cover audio file (WAV format) and provide the secret data.")
+        st.markdown("Upload a cover audio file and provide the secret data.")
     else:  # Video
-        st.markdown("Upload a cover video file (MP4 format) and provide the secret data.")
+        st.markdown("Upload a cover video file and provide the secret data.")
 
     key_bytes_encode = display_key_management(widget_key_prefix="encode")
 
@@ -182,59 +294,40 @@ with tab1:
         uploaded_cover = st.file_uploader(
             "Choose Cover Image:",
             type=ALLOWED_IMAGE_TYPES,
-            key="enc_file_cover"
+            key="enc_file_cover",
+            help=f"Supported formats: {', '.join(ALLOWED_IMAGE_TYPES)}"
         )
         
-        if uploaded_cover and uploaded_cover.type in ["image/jpeg", "image/jpg"]:
-            st.warning("⚠️ **Warning:** JPEG/JPG may not preserve hidden data if re-compressed.")
+        if uploaded_cover:
+            file_path, file_type = handle_file_upload(uploaded_cover, media_type)
+            if file_path:
+                st.image(cv2.imread(file_path), caption="Uploaded Image", use_container_width=True)
             
     elif media_type == "Audio":
         uploaded_cover = st.file_uploader(
-            "Choose Cover Audio (WAV):",
+            "Choose Cover Audio:",
             type=ALLOWED_AUDIO_TYPES,
-            key="enc_audio_cover"
-        )
-    else:  # Video
-        uploaded_cover = st.file_uploader(
-            "Choose Cover Video (MP4):",
-            type=ALLOWED_VIDEO_TYPES,
-            key="enc_video_cover"
+            key="enc_audio_cover",
+            help=f"Supported formats: {', '.join(ALLOWED_AUDIO_TYPES)}"
         )
         
-        # Show video info if uploaded
         if uploaded_cover:
-            temp_video_path = save_uploaded_file(uploaded_cover, "temp")
-            if temp_video_path:
-                try:
-                    video_info = get_video_info(temp_video_path)
-                    capacity_info = calculate_video_capacity(temp_video_path, embed_ratio)
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.info(f"""
-                        **Video Info:**
-                        - Resolution: {video_info['width']}×{video_info['height']}
-                        - Duration: {video_info['duration']:.1f} seconds
-                        - Frames: {video_info['frame_count']}
-                        - FPS: {video_info['fps']:.1f}
-                        """)
-                    
-                    with col2:
-                        st.info(f"""
-                        **Capacity Info:**
-                        - Frames to use: {capacity_info['frames_used']}
-                        - Capacity: {capacity_info['capacity_mb']:.2f} MB
-                        - Total capacity: {capacity_info['total_capacity_bytes']:,} bytes
-                        """)
-                    
-                    # Preview video
-                    st.video(uploaded_cover.getvalue())
-                    
-                except Exception as e:
-                    st.error(f"Error analyzing video: {e}")
-                finally:
-                    if os.path.exists(temp_video_path):
-                        os.remove(temp_video_path)
+            file_path, file_type = handle_file_upload(uploaded_cover, media_type)
+            if file_path:
+                st.audio(file_path)
+                
+    else:  # Video
+        uploaded_cover = st.file_uploader(
+            "Choose Cover Video:",
+            type=ALLOWED_VIDEO_TYPES,
+            key="enc_video_cover",
+            help=f"Supported formats: {', '.join(ALLOWED_VIDEO_TYPES)}"
+        )
+        
+        if uploaded_cover:
+            file_path, file_type = handle_file_upload(uploaded_cover, media_type)
+            if file_path:
+                st.video(file_path)
 
     st.subheader("3. Encode")
     encode_button = st.button("Encode Media", key="enc_button", 
@@ -570,18 +663,3 @@ with tab3:
     - **Real-time encoding/decoding** not practical for long videos
     """)
 
-# --- Footer ---
-st.markdown("---")
-st.markdown("""
-**Advanced StegoTool v2.1** - Complete multimedia steganography with Image, Audio, and Video support.
-
-⚠️ **Disclaimer:** This tool is for educational and research purposes. Use responsibly and in compliance with applicable laws.
-""")
-
-# Clean up temp directory on app restart
-if os.path.exists("temp"):
-    import shutil
-    try:
-        shutil.rmtree("temp")
-    except:
-        pass 

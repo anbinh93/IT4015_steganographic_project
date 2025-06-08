@@ -90,7 +90,7 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
     Encodes secret bytes into a video file using LSB steganography.
     
     Args:
-        video_path: Path to the input MP4 video file
+        video_path: Path to the input video file
         secret_message: The secret data to hide (as bytes)
         output_path: Path for the output stego video file (optional)
         embed_ratio: Ratio of frames to use for embedding (0.0 to 1.0)
@@ -121,6 +121,9 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
     try:
         message_with_delimiter = secret_message + DELIMITER.encode('utf-8')
         binary_secret_message = message_to_binary(message_with_delimiter)
+        logging.info(f"Binary message length: {len(binary_secret_message)}")
+        logging.info(f"Binary message: {binary_secret_message[:100]}...")  # Log first 100 bits
+        logging.info(f"Delimiter binary: {message_to_binary(DELIMITER)}")  # Log delimiter
     except Exception as e:
         logging.error(f"Error converting message to binary: {e}")
         raise EncodingError(f"Failed to prepare message for encoding: {e}")
@@ -135,10 +138,11 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
             f"({capacity_info['total_capacity_bytes']} bytes)."
         )
     
-    # Set output path
+    # Set output path to AVI for lossless LSB
     if output_path is None:
         video_stem = Path(video_path).stem
-        output_path = str(Path(video_path).parent / f"{video_stem}_stego.mp4")
+        output_path = str(Path(video_path).parent / f"{video_stem}_stego.avi")
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
     
     # Open input video
     cap = cv2.VideoCapture(video_path)
@@ -151,10 +155,7 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    # Setup video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    
     if not out.isOpened():
         cap.release()
         raise EncodingError(f"Could not create output video: {output_path}")
@@ -164,35 +165,33 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
         frames_to_embed = int(total_frames * embed_ratio)
         frame_interval = max(1, total_frames // frames_to_embed) if frames_to_embed > 0 else total_frames
         
-        logging.info(f"Embedding in {frames_to_embed} out of {total_frames} frames")
+        logging.info(f"ENCODE: total_frames={total_frames}, frames_to_embed={frames_to_embed}, frame_interval={frame_interval}")
+        logging.info(f"ENCODE: First frame to embed: 0, Last frame to embed: {frame_interval * (frames_to_embed - 1)}")
         
         frame_count = 0
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            
+                
             # Decide whether to embed in this frame
             should_embed = (frame_count % frame_interval == 0) and (bit_index < required_bits)
             
             if should_embed:
-                # Embed data in this frame
+                logging.info(f"ENCODE: Embedding in frame {frame_count}")
                 height, width, channels = frame.shape
-                frame_bits_available = height * width * channels
+                frame_bits_embedded = 0
                 
                 for i in range(height):
                     for j in range(width):
                         for k in range(channels):
                             if bit_index < required_bits:
-                                # Get current pixel value
-                                pixel_val = frame[i, j, k]
-                                
-                                # Convert to binary and modify LSB
-                                pixel_bin = format(pixel_val, '08b')
-                                modified_pixel_bin = pixel_bin[:-1] + binary_secret_message[bit_index]
-                                frame[i, j, k] = int(modified_pixel_bin, 2)
-                                
+                                pixel_val = int(frame[i, j, k])
+                                bit_value = 1 if binary_secret_message[bit_index] == '1' else 0
+                                pixel_val = (pixel_val & 0xFE) | bit_value
+                                frame[i, j, k] = pixel_val
                                 bit_index += 1
+                                frame_bits_embedded += 1
                             else:
                                 break
                         if bit_index >= required_bits:
@@ -200,17 +199,18 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
                     if bit_index >= required_bits:
                         break
                 
+                logging.info(f"ENCODE: Frame {frame_count}: Embedded {frame_bits_embedded} bits")
                 if bit_index >= required_bits:
-                    logging.info(f"Finished embedding at frame {frame_count}")
+                    logging.info(f"ENCODE: Finished embedding at frame {frame_count}")
+                    logging.info(f"ENCODE: Total bits embedded: {bit_index}/{required_bits}")
             
-            # Write frame to output
             out.write(frame)
             frame_count += 1
             
-            # Progress logging
             if frame_count % 100 == 0:
                 progress = (frame_count / total_frames) * 100
-                logging.info(f"Processing progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
+                logging.info(f"ENCODE: Progress {progress:.1f}% ({frame_count}/{total_frames} frames)")
+                logging.info(f"ENCODE: Bits embedded: {bit_index}/{required_bits}")
     
     except Exception as e:
         logging.error(f"Error during video encoding: {e}")
@@ -221,11 +221,11 @@ def encode_video_lsb(video_path: str, secret_message: bytes, output_path: str = 
         out.release()
     
     if bit_index < required_bits:
-        logging.error("Not all data was embedded in the video")
+        logging.error(f"ENCODE: Not all data was embedded. Embedded {bit_index}/{required_bits} bits")
         raise EncodingError("Video capacity insufficient or encoding error occurred")
     
-    logging.info(f"Successfully embedded {bit_index} bits in video")
-    logging.info(f"Stego video saved to: {output_path}")
+    logging.info(f"ENCODE: Successfully embedded {bit_index} bits in video")
+    logging.info(f"ENCODE: Stego video saved to: {output_path}")
     
     return output_path
 
@@ -246,13 +246,14 @@ def decode_video_lsb(stego_video_path: str, embed_ratio: float = 0.1) -> bytes:
     if not (0.0 < embed_ratio <= 1.0):
         raise ValueError("embed_ratio must be between 0.0 and 1.0")
     
-    # Open video
     cap = cv2.VideoCapture(stego_video_path)
     if not cap.isOpened():
         raise DecodingError(f"Could not open stego video file: {stego_video_path}")
     
     try:
         delimiter_bin = message_to_binary(DELIMITER)
+        logging.info(f"DECODE: Delimiter binary length: {len(delimiter_bin)}")
+        logging.info(f"DECODE: Delimiter binary: {delimiter_bin}")
     except Exception as e:
         logging.error(f"Could not convert delimiter to binary: {e}")
         raise DecodingError("Internal error preparing delimiter for decoding.")
@@ -260,14 +261,15 @@ def decode_video_lsb(stego_video_path: str, embed_ratio: float = 0.1) -> bytes:
     len_delimiter_bits = len(delimiter_bin)
     binary_data = ""
     
-    logging.info("Starting video LSB decoding...")
+    logging.info("DECODE: Starting video LSB decoding...")
     
     try:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frames_to_check = int(total_frames * embed_ratio)
         frame_interval = max(1, total_frames // frames_to_check) if frames_to_check > 0 else total_frames
         
-        logging.info(f"Checking {frames_to_check} out of {total_frames} frames")
+        logging.info(f"DECODE: total_frames={total_frames}, frames_to_check={frames_to_check}, frame_interval={frame_interval}")
+        logging.info(f"DECODE: First frame to check: 0, Last frame to check: {frame_interval * (frames_to_check - 1)}")
         
         frame_count = 0
         while True:
@@ -279,40 +281,47 @@ def decode_video_lsb(stego_video_path: str, embed_ratio: float = 0.1) -> bytes:
             should_check = (frame_count % frame_interval == 0)
             
             if should_check:
+                logging.info(f"DECODE: Checking frame {frame_count}")
                 height, width, channels = frame.shape
+                frame_bits_extracted = 0
                 
-                # Extract LSBs from this frame
                 for i in range(height):
                     for j in range(width):
                         for k in range(channels):
-                            pixel_val = frame[i, j, k]
-                            lsb = format(pixel_val, '08b')[-1]
+                            pixel_val = int(frame[i, j, k])
+                            lsb = str(pixel_val & 1)
                             binary_data += lsb
+                            frame_bits_extracted += 1
                             
                             # Check for delimiter frequently
                             if len(binary_data) >= len_delimiter_bits:
                                 if binary_data.endswith(delimiter_bin):
-                                    logging.info(f"Delimiter found after extracting {len(binary_data)} bits from video.")
-                                    # Get binary data before the delimiter
+                                    logging.info(f"DECODE: Delimiter found after extracting {len(binary_data)} bits from video")
+                                    logging.info(f"DECODE: Last {len_delimiter_bits} bits: {binary_data[-len_delimiter_bits:]}")
                                     secret_bin = binary_data[:-len_delimiter_bits]
-                                    
-                                    # Convert to bytes
                                     decoded_encrypted_bytes = _binary_string_to_bytes(secret_bin)
                                     cap.release()
                                     return decoded_encrypted_bytes
+                
+                logging.info(f"DECODE: Frame {frame_count}: Extracted {frame_bits_extracted} bits")
             
             frame_count += 1
             
-            # Progress logging
             if frame_count % 100 == 0:
                 progress = (frame_count / total_frames) * 100
-                logging.info(f"Decoding progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
+                logging.info(f"DECODE: Progress {progress:.1f}% ({frame_count}/{total_frames} frames)")
+                logging.info(f"DECODE: Current binary data length: {len(binary_data)}")
+                if len(binary_data) > 0:
+                    logging.info(f"DECODE: Last 100 bits: {binary_data[-100:]}")
         
         # If we reach here, delimiter was not found
         cap.release()
-        logging.warning("Reached end of video without finding delimiter.")
+        logging.warning("DECODE: Reached end of video without finding delimiter")
+        logging.warning(f"DECODE: Total bits extracted: {len(binary_data)}")
+        if len(binary_data) > 0:
+            logging.warning(f"DECODE: Last 100 bits: {binary_data[-100:]}")
         raise DecodingError("Delimiter not found in the video. Is this a valid stego video file?")
-        
+    
     except DecodingError as e:
         cap.release()
         raise e

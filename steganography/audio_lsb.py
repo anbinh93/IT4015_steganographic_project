@@ -65,6 +65,7 @@ def encode_audio_lsb(audio_file_path: str, secret_message: bytes, output_path: s
             audio_data = audio_data[:, 0]
         
         logging.info(f"Audio file loaded: {len(audio_data)} samples, sample rate: {sample_rate}")
+        logging.info(f"Audio data type: {audio_data.dtype}, min: {np.min(audio_data)}, max: {np.max(audio_data)}")
         
     except Exception as e:
         logging.error(f"Error loading audio file: {e}")
@@ -78,6 +79,7 @@ def encode_audio_lsb(audio_file_path: str, secret_message: bytes, output_path: s
     try:
         message_with_delimiter = secret_message + DELIMITER.encode('utf-8')
         binary_secret_message = message_to_binary(message_with_delimiter)
+        logging.info(f"Binary message length: {len(binary_secret_message)}")
     except Exception as e:
         logging.error(f"Error converting message to binary: {e}")
         raise EncodingError(f"Failed to prepare message for encoding: {e}")
@@ -93,20 +95,44 @@ def encode_audio_lsb(audio_file_path: str, secret_message: bytes, output_path: s
     
     # Embed the secret message
     for i in range(required_bits):
-        # Modify the LSB of each audio sample
-        sample_bin = format(stego_audio[i] & 0xFFFF, '016b')  # 16-bit signed
-        modified_sample_bin = sample_bin[:-1] + binary_secret_message[i]
-        stego_audio[i] = int(modified_sample_bin, 2)
-        
-        # Handle negative numbers (convert back from unsigned to signed)
-        if stego_audio[i] > 32767:
-            stego_audio[i] -= 65536
+        try:
+            # Get current sample value
+            current_sample = int(stego_audio[i])
+            
+            # Convert to unsigned for bit manipulation
+            if current_sample < 0:
+                current_sample += 65536  # Convert to unsigned
+            
+            # Clear the LSB and set it to the message bit
+            bit_value = 1 if binary_secret_message[i] == '1' else 0
+            current_sample = (current_sample & 0xFFFE) | bit_value
+            
+            # Convert back to signed int16
+            if current_sample > 32767:
+                current_sample -= 65536
+            
+            # Ensure the value is within int16 range
+            current_sample = np.clip(current_sample, -32768, 32767)
+            
+            # Update the sample
+            stego_audio[i] = current_sample
+            
+            # Log every 1000 samples
+            if i % 1000 == 0:
+                logging.debug(f"Processed {i}/{required_bits} bits")
+                
+        except Exception as e:
+            logging.error(f"Error processing bit {i}: {e}")
+            logging.error(f"Current sample: {current_sample}, Bit value: {bit_value}")
+            raise EncodingError(f"Failed to encode bit {i}: {e}")
     
     # Save the stego audio file
     if output_path is None:
         output_path = audio_file_path.replace('.wav', '_stego.wav')
     
     try:
+        # Ensure the data is int16 before saving
+        stego_audio = stego_audio.astype(np.int16)
         wavfile.write(output_path, sample_rate, stego_audio)
         logging.info(f"Stego audio saved to: {output_path}")
         return output_path
@@ -139,12 +165,16 @@ def decode_audio_lsb(stego_audio_path: str) -> bytes:
         if len(stego_audio.shape) == 2:
             stego_audio = stego_audio[:, 0]
             
+        logging.info(f"Stego audio loaded: {len(stego_audio)} samples, sample rate: {sample_rate}")
+        logging.info(f"Stego audio type: {stego_audio.dtype}, min: {np.min(stego_audio)}, max: {np.max(stego_audio)}")
+            
     except Exception as e:
         logging.error(f"Error loading stego audio file: {e}")
         raise DecodingError(f"Failed to load stego audio file: {e}")
     
     try:
         delimiter_bin = message_to_binary(DELIMITER)
+        logging.info(f"Delimiter binary length: {len(delimiter_bin)}")
     except Exception as e:
         logging.error(f"Could not convert delimiter to binary: {e}")
         raise DecodingError("Internal error preparing delimiter for decoding.")
@@ -157,21 +187,37 @@ def decode_audio_lsb(stego_audio_path: str) -> bytes:
     try:
         # Extract LSBs from audio samples
         for i in range(len(stego_audio)):
-            # Get the LSB of each audio sample
-            sample_unsigned = stego_audio[i] & 0xFFFF  # Convert to unsigned for bit operations
-            lsb = format(sample_unsigned, '016b')[-1]
-            binary_data += lsb
-            
-            # Check if delimiter is found
-            if len(binary_data) >= len_delimiter_bits:
-                if binary_data.endswith(delimiter_bin):
-                    logging.info(f"Delimiter found after extracting {len(binary_data)} bits from audio.")
-                    # Get binary data before the delimiter
-                    secret_bin = binary_data[:-len_delimiter_bits]
-                    
-                    # Convert to bytes
-                    decoded_encrypted_bytes = _binary_string_to_bytes(secret_bin)
-                    return decoded_encrypted_bytes
+            try:
+                # Get current sample value
+                current_sample = int(stego_audio[i])
+                
+                # Convert to unsigned for bit manipulation
+                if current_sample < 0:
+                    current_sample += 65536
+                
+                # Extract LSB
+                lsb = str(current_sample & 1)
+                binary_data += lsb
+                
+                # Log every 1000 samples
+                if i % 1000 == 0:
+                    logging.debug(f"Processed {i} samples")
+                
+                # Check if delimiter is found
+                if len(binary_data) >= len_delimiter_bits:
+                    if binary_data.endswith(delimiter_bin):
+                        logging.info(f"Delimiter found after extracting {len(binary_data)} bits from audio.")
+                        # Get binary data before the delimiter
+                        secret_bin = binary_data[:-len_delimiter_bits]
+                        
+                        # Convert to bytes
+                        decoded_encrypted_bytes = _binary_string_to_bytes(secret_bin)
+                        return decoded_encrypted_bytes
+                        
+            except Exception as e:
+                logging.error(f"Error processing sample {i}: {e}")
+                logging.error(f"Current sample: {current_sample}")
+                raise DecodingError(f"Failed to decode sample {i}: {e}")
         
         # If we reach here, delimiter was not found
         logging.warning("Reached end of audio without finding delimiter.")
@@ -181,4 +227,4 @@ def decode_audio_lsb(stego_audio_path: str) -> bytes:
         raise e
     except Exception as e:
         logging.error(f"An unexpected error occurred during audio LSB extraction: {e}", exc_info=True)
-        raise DecodingError(f"Error during audio LSB extraction process: {e}") 
+        raise DecodingError(f"Error during audio LSB extraction process: {e}")

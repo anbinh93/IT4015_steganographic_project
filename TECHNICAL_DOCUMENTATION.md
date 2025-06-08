@@ -66,7 +66,7 @@ Libraries:
 │  │   Handler    │ │   Handler    │ │   Handler    │    │
 │  └──────────────┘ └──────────────┘ └──────────────┘    │
 ├─────────────────────────────────────────────────────────┤
-│                   BUSINESS LAYER                        │
+│                   MODEL LAYER                        │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
 │  │  Encryption  │ │Steganography │ │    Utils     │    │
 │  │   Service    │ │   Service    │ │   Service    │    │

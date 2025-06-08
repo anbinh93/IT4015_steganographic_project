@@ -13,12 +13,15 @@ Author: Nguyễn Bình An, Vũ Ngọc Đức, Lê Thị Quỳnh
 Version: 2.1.0
 """
 
-from .lsb import encode_lsb, decode_lsb
-from .audio_lsb import encode_audio_lsb, decode_audio_lsb
-from .dct_stego import encode_dct, decode_dct
-from .video_lsb import encode_video_lsb, decode_video_lsb, calculate_video_capacity, get_video_info
-from .utils import generate_key, encrypt_message, decrypt_message, message_to_binary
+# Import core modules
 from .exceptions import SteganographyError, CapacityError, EncodingError, DecodingError
+from .utils import generate_key, encrypt_message, decrypt_message, message_to_binary
+
+# Import steganography modules
+from .lsb import encode_lsb, decode_lsb
+from .dct_stego import encode_dct, decode_dct
+from .audio_lsb import encode_audio_lsb, decode_audio_lsb
+from .video_lsb import encode_video_lsb, decode_video_lsb, calculate_video_capacity, get_video_info
 
 __version__ = "2.1.0"
 __all__ = [
